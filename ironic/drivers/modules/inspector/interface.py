@@ -33,18 +33,17 @@ def tear_down_managed_boot(task, always_power_off=False):
     errors = []
     ironic_manages_boot = utils.pop_node_nested_field(
         task.node, 'driver_internal_info', _IRONIC_MANAGES_BOOT)
-    power_off_done = False
 
     if ironic_manages_boot:
-        # First, perform a graceful shutdown BEFORE ejecting virtual media
-        # to avoid filesystem corruption errors on the node. The OS needs
-        # access to the virtual media to shut down cleanly.
-        if (CONF.inspector.power_off
-                and not utils.fast_track_enabled(task.node)
-                and not task.node.disable_power_off):
+        # NOTE: We always do soft power off before ejecting virtual media
+        # to avoid filesystem corruption. The ramdisk OS needs access to the
+        # ISO to shut down cleanly. This is independent of inspector.power_off
+        # setting, which only controls whether to do a final power off.
+        if not utils.fast_track_enabled(task.node) and not task.node.disable_power_off:
             try:
+                LOG.info('Performing soft power off for node %s before '
+                         'ejecting virtual media', task.node.uuid)
                 cond_utils.node_power_action(task, states.SOFT_POWER_OFF)
-                power_off_done = True
             except Exception as exc:
                 errors.append(_('unable to power off the node: %s') % exc)
                 LOG.exception('Unable to power off node %s for inspection',
@@ -67,8 +66,7 @@ def tear_down_managed_boot(task, always_power_off=False):
 
     if ((ironic_manages_boot or always_power_off)
             and CONF.inspector.power_off
-            and not utils.fast_track_enabled(task.node)
-            and not power_off_done):
+            and not utils.fast_track_enabled(task.node)):
         if task.node.disable_power_off:
             LOG.debug('Rebooting node %s instead of powering it off because '
                       'disable_power_off is set to True', task.node.uuid)
