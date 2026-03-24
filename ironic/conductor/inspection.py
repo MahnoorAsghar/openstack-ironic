@@ -12,6 +12,8 @@
 
 """Inspection implementation for the conductor."""
 
+import time
+
 from oslo_log import log
 from oslo_utils import excutils
 
@@ -62,6 +64,9 @@ def inspect_hardware(task):
         raise exception.HardwareInspectionFailure(error=error)
 
     if new_state == states.MANAGEABLE:
+        LOG.info('Inspection complete for node %(node)s, waiting 30 seconds '
+                 'before transitioning state', {'node': node.uuid})
+        time.sleep(30)
         task.process_event('done')
         LOG.info('Successfully inspected node %(node)s',
                  {'node': node.uuid})
@@ -170,6 +175,9 @@ def continue_inspection(task, inventory, plugin_data):
                 task.process_event('fail')
 
     if node.provision_state != states.ENROLL:
+        LOG.info('Inspection complete for node %s, waiting 30 seconds '
+                 'before transitioning state', node.uuid)
+        time.sleep(30)
         task.process_event('done')
         LOG.info('Successfully finished inspection of node %s', node.uuid)
     else:
