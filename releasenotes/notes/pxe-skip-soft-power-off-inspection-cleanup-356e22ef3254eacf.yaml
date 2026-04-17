@@ -1,0 +1,7 @@
+---
+fixes:
+  - |
+    During managed inspection teardown, skip the soft power off that precedes
+    ``clean_up_ramdisk`` when the boot interface is network PXE/iPXE-based.
+    That power off is only required before ejecting BMC virtual media; for PXE
+    it added delay without benefit, causing timeouts in downstream CI jobs.

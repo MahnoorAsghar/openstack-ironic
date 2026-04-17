@@ -22,11 +22,16 @@ from ironic.conf import CONF
 from ironic.drivers import base
 from ironic.drivers.modules import deploy_utils
 from ironic.drivers.modules import inspect_utils
+from ironic.drivers.modules import pxe_base
 
 LOG = logging.getLogger(__name__)
 
 # Internal field to mark whether ironic or inspector manages boot for the node
 _IRONIC_MANAGES_BOOT = 'inspector_manage_boot'
+
+
+def _uses_network_pxe_ramdisk_boot(task):
+    return isinstance(task.driver.boot, pxe_base.PXEBaseMixin)
 
 
 def tear_down_managed_boot(task, always_power_off=False):
@@ -40,13 +45,22 @@ def tear_down_managed_boot(task, always_power_off=False):
         # operation. Similarly, if disable_power_off is set, the user wants
         # the node to stay running, so we can't eject media from under the
         # running OS.
-        # If neither condition applies, we must do soft power off before
-        # ejecting media to avoid filesystem corruption.
         if cond_utils.is_fast_track(task) or task.node.disable_power_off:
             LOG.debug('Skipping inspection cleanup for node %s (fast_track=%s,'
                       ' disable_power_off=%s)', task.node.uuid,
                       cond_utils.is_fast_track(task),
                       task.node.disable_power_off)
+        # Network PXE boot only cleans conductor-side files; soft power off is
+        # unnecessary.
+        elif _uses_network_pxe_ramdisk_boot(task):
+            try:
+                task.driver.boot.clean_up_ramdisk(task)
+            except Exception as exc:
+                errors.append(_('unable to clean up ramdisk boot: %s') % exc)
+                LOG.exception('Unable to clean up ramdisk boot for node %s',
+                              task.node.uuid)
+        # If neither of the above apply, we must do soft power off before
+        # ejecting virtual media to avoid filesystem corruption.
         else:
             try:
                 LOG.info('Performing soft power off for node %s before '
