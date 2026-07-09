@@ -29,34 +29,60 @@ LOG = logging.getLogger(__name__)
 _IRONIC_MANAGES_BOOT = 'inspector_manage_boot'
 
 
+def _should_clean_up_inspection_ramdisk(task):
+    """Whether inspection tear-down should call clean_up_ramdisk.
+
+    Boot interfaces with ``can_clean_up_ramdisk_while_on`` always clean up
+    (conductor-side cleanup that does not remove the boot device from under a
+    running OS). Virtual media and similar interfaces skip cleanup when fast
+    track is active or disable_power_off is set, since ejecting media from
+    under a running OS can cause filesystem corruption.
+    """
+    if 'can_clean_up_ramdisk_while_on' in task.driver.boot.capabilities:
+        return True
+    return not (cond_utils.is_fast_track(task)
+                or task.node.disable_power_off)
+
+
+def _clean_up_inspection_ramdisk(task, errors):
+    if not _should_clean_up_inspection_ramdisk(task):
+        LOG.debug('Skipping inspection ramdisk cleanup for node %s '
+                  '(fast_track=%s, disable_power_off=%s)',
+                  task.node.uuid, cond_utils.is_fast_track(task),
+                  task.node.disable_power_off)
+        return
+
+    if 'can_clean_up_ramdisk_while_on' not in task.driver.boot.capabilities:
+        # Ejecting virtual media removes the node's boot device. Request
+        # a graceful out-of-band shutdown and wait for the host to power
+        # off before ejecting, so the ramdisk OS can shut down while the
+        # media is still attached. This does not send an explicit shutdown
+        # command to IPA; it relies on the OS handling ACPI shutdown.
+        try:
+            LOG.info('Performing soft power off for node %s before '
+                     'ejecting virtual media', task.node.uuid)
+            cond_utils.node_power_action(task, states.SOFT_POWER_OFF)
+        except Exception as exc:
+            errors.append(_('unable to power off the node: %s') % exc)
+            LOG.exception('Unable to power off node %s for inspection',
+                          task.node.uuid)
+
+    try:
+        task.driver.boot.clean_up_ramdisk(task)
+    except Exception as exc:
+        errors.append(_('unable to clean up ramdisk boot: %s') % exc)
+        LOG.exception('Unable to clean up ramdisk boot for node %s',
+                      task.node.uuid)
+
+
 def tear_down_managed_boot(task, always_power_off=False):
     errors = []
     ironic_manages_boot = utils.pop_node_nested_field(
         task.node, 'driver_internal_info', _IRONIC_MANAGES_BOOT)
-    power_off_done = False
 
     if ironic_manages_boot:
-        # First, perform a graceful shutdown BEFORE ejecting virtual media
-        # to avoid filesystem corruption errors on the node. The OS needs
-        # access to the virtual media to shut down cleanly.
-        if (CONF.inspector.power_off
-                and not utils.fast_track_enabled(task.node)
-                and not task.node.disable_power_off):
-            try:
-                cond_utils.node_power_action(task, states.SOFT_POWER_OFF)
-                power_off_done = True
-            except Exception as exc:
-                errors.append(_('unable to power off the node: %s') % exc)
-                LOG.exception('Unable to power off node %s for inspection',
-                              task.node.uuid)
+        _clean_up_inspection_ramdisk(task, errors)
 
-        # Now it's safe to eject virtual media since the OS has shut down
-        try:
-            task.driver.boot.clean_up_ramdisk(task)
-        except Exception as exc:
-            errors.append(_('unable to clean up ramdisk boot: %s') % exc)
-            LOG.exception('Unable to clean up ramdisk boot for node %s',
-                          task.node.uuid)
         try:
             with cond_utils.power_state_for_network_configuration(task):
                 task.driver.network.remove_inspection_network(task)
@@ -67,8 +93,7 @@ def tear_down_managed_boot(task, always_power_off=False):
 
     if ((ironic_manages_boot or always_power_off)
             and CONF.inspector.power_off
-            and not utils.fast_track_enabled(task.node)
-            and not power_off_done):
+            and not utils.fast_track_enabled(task.node)):
         if task.node.disable_power_off:
             LOG.debug('Rebooting node %s instead of powering it off because '
                       'disable_power_off is set to True', task.node.uuid)

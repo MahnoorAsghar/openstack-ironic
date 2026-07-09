@@ -37,7 +37,8 @@ METRICS = metrics_utils.get_metrics_logger(__name__)
 
 class PXEBoot(pxe_base.PXEBaseMixin, base.BootInterface):
 
-    capabilities = ['ramdisk_boot', 'pxe_boot']
+    capabilities = ['ramdisk_boot', 'pxe_boot',
+                    'can_clean_up_ramdisk_while_on']
 
     def __init__(self):
         pxe_utils.place_common_config()
@@ -49,7 +50,8 @@ class HttpBoot(pxe_base.PXEBaseMixin, base.BootInterface):
 
     http_boot_enabled = True
 
-    capabilities = ['ramdisk_boot', 'pxe_boot']
+    capabilities = ['ramdisk_boot', 'pxe_boot',
+                    'can_clean_up_ramdisk_while_on']
 
     def __init__(self):
         pxe_utils.place_common_config()

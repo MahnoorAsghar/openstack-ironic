@@ -1303,7 +1303,7 @@ class RedfishHttpsBoot(base.BootInterface):
     ``ramdisk`` deployment.
     """
 
-    capabilities = ['ramdisk_boot']
+    capabilities = ['ramdisk_boot', 'can_clean_up_ramdisk_while_on']
 
     def get_properties(self):
         """Return the properties of the interface.

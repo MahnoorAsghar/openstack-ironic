@@ -1,0 +1,15 @@
+---
+fixes:
+  - |
+    During managed in-band inspection tear-down, issue a soft power off before
+    ejecting virtual media, regardless of the value of the
+    ``[inspector]power_off`` configuration option. Powering off before
+    ejecting virtual media avoids filesystem corruption when the operating
+    system loses access to its boot media during shutdown (particularly
+    visible on iDRAC consoles).
+
+    Boot interfaces that only perform conductor-side cleanup (for example
+    PXE and ``redfish-https``) declare the ``can_clean_up_ramdisk_while_on``
+    capability. For those interfaces, skip the soft power off and only run
+    ``clean_up_ramdisk``. Soft power off is only required before ejecting
+    virtual media and would break fast-track provisioning for those nodes.
