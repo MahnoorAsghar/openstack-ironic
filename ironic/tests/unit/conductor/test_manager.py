@@ -2177,6 +2177,30 @@ class ServiceDoNodeDeployTestCase(mgr_utils.ServiceSetUpMixin,
         self.assertEqual(states.AVAILABLE, node.provision_state)
 
     @mock.patch.object(deployments, 'start_deploy', autospec=True)
+    def test_do_node_deploy_disallowed_step_raises_send_raw(
+            self, mock_start, mock_iwdi):
+        mock_iwdi.return_value = False
+        self._start_service()
+        deploy_steps = [
+            {'step': 'send_raw',
+             'priority': 7,
+             'interface': 'vendor'}
+        ]
+        node = obj_utils.create_test_node(
+            self.context, driver='fake-hardware',
+            provision_state=states.AVAILABLE,
+            target_provision_state=states.NOSTATE)
+        exc = self.assertRaises(messaging.rpc.ExpectedException,
+                                self.service.do_node_deploy,
+                                self.context, node.uuid,
+                                deploy_steps=deploy_steps)
+        self.assertEqual(exception.StepNotAllowed, exc.exc_info[0])
+        # start_deploy must NOT have been called
+        self.assertFalse(mock_start.called)
+        node.refresh()
+        self.assertEqual(states.AVAILABLE, node.provision_state)
+
+    @mock.patch.object(deployments, 'start_deploy', autospec=True)
     def test_do_node_deploy_allowed_step_proceeds(self, mock_start,
                                                   mock_iwdi):
         """Allowed deploy step proceeds normally."""
@@ -3541,6 +3565,36 @@ class DoNodeCleanTestCase(mgr_utils.ServiceSetUpMixin, db_base.DbTestCase):
                 autospec=True)
     @mock.patch('ironic.drivers.modules.fake.FakePower.validate',
                 autospec=True)
+    def test_do_node_clean_disallowed_step_raises_send_raw(
+            self, mock_power_valid,
+            mock_network_valid,
+            mock_process):
+        node = obj_utils.create_test_node(
+            self.context, driver='fake-hardware',
+            provision_state=states.MANAGEABLE,
+            target_provision_state=states.NOSTATE)
+        self._start_service()
+        clean_steps = [
+            {'step': 'send_raw',
+             'priority': 7,
+             'interface': 'vendor'}
+        ]
+        exc = self.assertRaises(messaging.rpc.ExpectedException,
+                                self.service.do_node_clean,
+                                self.context, node.uuid, clean_steps)
+        self.assertEqual(exception.StepNotAllowed, exc.exc_info[0])
+        # process_event must NOT have been called
+        self.assertFalse(mock_process.called)
+        node.refresh()
+        # Node stays in original state
+        self.assertEqual(states.MANAGEABLE, node.provision_state)
+
+    @mock.patch('ironic.conductor.task_manager.TaskManager.process_event',
+                autospec=True)
+    @mock.patch('ironic.drivers.modules.network.flat.FlatNetwork.validate',
+                autospec=True)
+    @mock.patch('ironic.drivers.modules.fake.FakePower.validate',
+                autospec=True)
     def test_do_node_clean_allowed_step_proceeds(self, mock_power_valid,
                                                  mock_network_valid,
                                                  mock_process):
@@ -3750,7 +3804,10 @@ class DoNodeServiceTestCase(mgr_utils.ServiceSetUpMixin, db_base.DbTestCase):
             target_provision_state=states.NOSTATE)
         self._start_service()
         self.service.do_node_service(self.context,
-                                     node.uuid, {'foo': 'bar'})
+                                     node.uuid,
+                                     [{'step': 'foo',
+                                       'priority': 7,
+                                       'interface': 'management'}])
         self.assertTrue(mock_pv.called)
         self.assertTrue(mock_nv.called)
         mock_event.assert_called_once_with(
@@ -3758,7 +3815,8 @@ class DoNodeServiceTestCase(mgr_utils.ServiceSetUpMixin, db_base.DbTestCase):
             'service',
             callback=mock.ANY,
             call_args=(servicing.do_node_service, mock.ANY,
-                       {'foo': 'bar'}, False),
+                       [{'step': 'foo', 'priority': 7,
+                         'interface': 'management'}], False),
             err_handler=mock.ANY, target_state='active')
 
     @mock.patch('ironic.conductor.manager.ConductorManager._spawn_worker',
@@ -3797,6 +3855,33 @@ class DoNodeServiceTestCase(mgr_utils.ServiceSetUpMixin, db_base.DbTestCase):
             target_provision_state=states.NOSTATE)
         self._start_service()
         service_steps = [self.deploy_update]
+        exc = self.assertRaises(messaging.rpc.ExpectedException,
+                                self.service.do_node_service,
+                                self.context, node.uuid, service_steps)
+        self.assertEqual(exception.StepNotAllowed, exc.exc_info[0])
+        self.assertFalse(mock_event.called)
+        node.refresh()
+        self.assertEqual(states.ACTIVE, node.provision_state)
+
+    @mock.patch('ironic.conductor.task_manager.TaskManager.process_event',
+                autospec=True)
+    @mock.patch('ironic.drivers.modules.network.flat.FlatNetwork.validate',
+                autospec=True)
+    @mock.patch('ironic.drivers.modules.fake.FakePower.validate',
+                autospec=True)
+    def test_do_node_service_disallowed_step_raises_on_send_raw(
+            self, mock_pv, mock_nv,
+            mock_event):
+        node = obj_utils.create_test_node(
+            self.context, driver='fake-hardware',
+            provision_state=states.ACTIVE,
+            target_provision_state=states.NOSTATE)
+        self._start_service()
+        service_steps = [
+            {'step': 'send_raw',
+             'priority': 7,
+             'interface': 'vendor'}
+        ]
         exc = self.assertRaises(messaging.rpc.ExpectedException,
                                 self.service.do_node_service,
                                 self.context, node.uuid, service_steps)
@@ -4519,6 +4604,28 @@ class DestroyNodeTestCase(mgr_utils.ServiceSetUpMixin, db_base.DbTestCase):
             self.assertRaises(exception.NodeNotFound,
                               self.dbapi.get_node_by_uuid,
                               node.uuid)
+
+    @mock.patch.object(objects.Node, 'release', autospec=True)
+    def test_destroy_node_no_release_reservation(self,
+                                                 mock_release):
+        """Verify destroy_node clears task.node before __exit__.
+
+        After a successful node deletion the task's node reference
+        must be None so that release_resources() does not attempt to
+        release the DB reservation on the already-deleted row. A
+        stale read in release_node() can otherwise raise NodeLocked
+        instead of NodeNotFound, surfacing a spurious HTTP 409 to
+        the caller.
+        """
+        self._start_service()
+        node = obj_utils.create_test_node(
+            self.context,
+            provision_state=states.MANAGEABLE)
+        self.service.destroy_node(self.context, node.uuid)
+        self.assertRaises(exception.NodeNotFound,
+                          self.dbapi.get_node_by_uuid,
+                          node.uuid)
+        mock_release.assert_not_called()
 
     def test_destroy_node_reserved(self):
         self._start_service()
@@ -8691,6 +8798,62 @@ class DoNodeAdoptionTestCase(mgr_utils.ServiceSetUpMixin, db_base.DbTestCase):
         self.assertIsNone(node.last_error)
         mock_spawn.assert_called_with(self.service,
                                       self.service._do_adoption, mock.ANY)
+
+    @mock.patch('ironic.drivers.modules.fake.FakeDeploy.switch_interface',
+                autospec=True)
+    @mock.patch('ironic.drivers.modules.fake.FakeDeploy.take_over',
+                autospec=True)
+    @mock.patch('ironic.drivers.modules.fake.FakeDeploy.prepare',
+                autospec=True)
+    def test__do_adoption_calls_switch_interface(self,
+                                                 mock_prepare,
+                                                 mock_take_over,
+                                                 mock_switch):
+        """Test that adoption calls switch_interface before takeover."""
+        self._start_service()
+        node = obj_utils.create_test_node(
+            self.context, driver='fake-hardware',
+            provision_state=states.ADOPTING)
+        task = task_manager.TaskManager(self.context, node.uuid)
+
+        self.service._do_adoption(task)
+        node.refresh()
+
+        self.assertEqual(states.ACTIVE, node.provision_state)
+        mock_switch.assert_called_once_with(task.driver.deploy, task)
+        mock_prepare.assert_called_once_with(task.driver.deploy, task)
+        mock_take_over.assert_called_once_with(task.driver.deploy, task)
+
+    @mock.patch('ironic.drivers.modules.fake.FakeDeploy.restore_interface',
+                autospec=True)
+    @mock.patch('ironic.drivers.modules.fake.FakeDeploy.switch_interface',
+                autospec=True)
+    @mock.patch('ironic.drivers.modules.fake.FakeDeploy.take_over',
+                autospec=True)
+    @mock.patch('ironic.drivers.modules.fake.FakeDeploy.prepare',
+                autospec=True)
+    def test__do_adoption_failure_calls_restore_interface(self,
+                                                          mock_prepare,
+                                                          mock_take_over,
+                                                          mock_switch,
+                                                          mock_restore):
+        """Test that failed adoption calls restore_interface."""
+        mock_take_over.side_effect = exception.IPMIFailure(
+            "something went wrong")
+
+        self._start_service()
+        node = obj_utils.create_test_node(
+            self.context, driver='fake-hardware',
+            provision_state=states.ADOPTING,
+            power_state=states.POWER_ON)
+        task = task_manager.TaskManager(self.context, node.uuid)
+
+        self.service._do_adoption(task)
+        node.refresh()
+
+        self.assertEqual(states.ADOPTFAIL, node.provision_state)
+        mock_switch.assert_called_once_with(task.driver.deploy, task)
+        mock_restore.assert_called_once_with(task.driver.deploy, task)
 
     def test_do_provisioning_action_manage_of_failed_adoption(self):
         """Test a node in ADOPTFAIL can be taken to MANAGEABLE"""
